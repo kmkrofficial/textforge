@@ -33,3 +33,5 @@ derby.log
 # Keycloak Python
 .keycloak/
 
+*.jpg
+*.pdf
