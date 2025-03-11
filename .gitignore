@@ -16,3 +16,20 @@ tesseract/*
 logs/
 data/
 tmp/
+
+# Flask
+instance/
+*.pyc
+__pycache__/
+
+# PySpark
+metastore_db/
+derby.log
+
+# Pillow
+*.egg-info/
+*.eggs/
+
+# Keycloak Python
+.keycloak/
+
