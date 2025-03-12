@@ -1,91 +1,106 @@
 import json
-import threading
 import psycopg2
+import logging
 from kafka import KafkaConsumer
+from datetime import datetime
 from flask import Flask, request, jsonify
 
-# Database configuration
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+# Database Configuration
 DB_CONFIG = {
     "dbname": "ai-applications",
     "user": "postgres",
     "password": "password",
     "host": "localhost",
-    "port": "5432",
+    "port": "5432"
 }
 
-# Kafka configuration
+# Kafka Configuration
 KAFKA_TOPIC = "ocr-messages"
-KAFKA_BROKER = "localhost:9092"
+KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 
-# Initialize Flask app
+# Flask API Setup
 app = Flask(__name__)
 
-# Function to create a table if it does not exist
-def create_table():
-    conn = psycopg2.connect(**DB_CONFIG)
+# Connect to PostgreSQL
+def get_db_connection():
+    return psycopg2.connect(**DB_CONFIG)
+
+# Initialize Database Table
+def init_db():
+    conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS public.extracted_text (
             id SERIAL PRIMARY KEY,
-            email VARCHAR(255) NOT NULL,
-            message TEXT NOT NULL,
+            username TEXT NOT NULL,
+            text_data TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        );
-    """)
+        )
+    ''')
     conn.commit()
     cur.close()
     conn.close()
 
-# Function to insert data into PostgreSQL
-def insert_into_db(email, message):
-    conn = psycopg2.connect(**DB_CONFIG)
+# Save message to PostgreSQL
+def save_to_db(username, text_data):
+    conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("INSERT INTO messages (email, message) VALUES (%s, %s)", (email, message))
+    cur.execute(
+        "INSERT INTO public.extracted_text (username, text_data, created_at) VALUES (%s, %s, %s)",
+        (username, text_data, datetime.utcnow())
+    )
     conn.commit()
     cur.close()
     conn.close()
+    logging.info(f"Saved message from {username}")
 
-# Kafka consumer function
-def kafka_consumer():
+# Kafka Consumer Process
+def consume_messages():
     consumer = KafkaConsumer(
         KAFKA_TOPIC,
-        bootstrap_servers=KAFKA_BROKER,
-        value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+        bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+        group_id="ocr-consumer-group",
         auto_offset_reset="earliest",
+        enable_auto_commit=True,
+        value_deserializer=lambda x: json.loads(x.decode("utf-8"))
     )
+    
+    logging.info("Kafka Consumer started. Waiting for messages...")
+    
+    for msg in consumer:
+        try:
+            data = msg.value
+            username = data.get("username", "unknown")
+            text_data = data.get("message", "")
+            
+            if username and text_data:
+                save_to_db(username, text_data)
+            else:
+                logging.warning("Received message with missing data fields")
+        except Exception as e:
+            logging.error(f"Error processing message: {e}")
 
-    for message in consumer:
-        data = message.value
-        email = data.get("email")
-        msg = data.get("message")
-        if email and msg:
-            insert_into_db(email, msg)
-
-# Start Kafka consumer in a separate thread
-consumer_thread = threading.Thread(target=kafka_consumer, daemon=True)
-consumer_thread.start()
-
-
+# API to get messages by username
 @app.route("/messages", methods=["GET"])
 def get_messages():
-    email = request.args.get("email")  # Get email from query parameters
-    if not email:
-        return jsonify({"error": "Email parameter is required"}), 400
-
-    conn = psycopg2.connect(**DB_CONFIG)
+    username = request.args.get("username")
+    if not username:
+        return jsonify({"error": "Username parameter is required"}), 400
+    
+    conn = get_db_connection()
     cur = conn.cursor()
-    cur.execute("SELECT message, created_at FROM messages WHERE email = %s ORDER BY created_at DESC", (email,))
-    results = cur.fetchall()
+    cur.execute("SELECT text_data, created_at FROM public.extracted_text WHERE username = %s ORDER BY created_at DESC", (username,))
+    rows = cur.fetchall()
     cur.close()
     conn.close()
+    
+    messages = [{"message": row[0], "created_at": row[1].isoformat()} for row in rows]
+    return jsonify(messages)
 
-    if not results:
-        return jsonify({"error": "No messages found"}), 404
-
-    return jsonify({"email": email, "messages": [{"message": msg, "timestamp": str(ts)} for msg, ts in results]})
-
-
-# Entry point for running Flask
 if __name__ == "__main__":
-    create_table()
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    init_db()
+    consume_messages()
+    app.run(host="0.0.0.0", port=5001, debug=True)

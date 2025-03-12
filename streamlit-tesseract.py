@@ -6,7 +6,8 @@ import io
 import datetime
 from keycloak import KeycloakOpenID
 from streamlit_cookies_manager import CookieManager
-
+from kafka import KafkaProducer
+import json
 
 # Keycloak settings
 KEYCLOAK_SERVER_URL = "http://localhost:8080"
@@ -15,6 +16,9 @@ KEYCLOAK_CLIENT_ID = "streamlit-tesseract"
 KEYCLOAK_CLIENT_SECRET = "VZ7vo5htQ2LXBIY7okanesviwEJFmYuV"
 SESSION_EXPIRY_HOURS = 3
 
+# Kafka settings
+KAFKA_TOPIC = "ocr-messages"
+KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 
 # Initialize Keycloak client
 keycloak_openid = KeycloakOpenID(server_url=KEYCLOAK_SERVER_URL,
@@ -22,9 +26,13 @@ keycloak_openid = KeycloakOpenID(server_url=KEYCLOAK_SERVER_URL,
                                  realm_name=KEYCLOAK_REALM,
                                  client_secret_key=KEYCLOAK_CLIENT_SECRET)
 
-
 cookies = CookieManager()
 
+# Initialize Kafka Producer
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+    value_serializer=lambda v: json.dumps(v).encode("utf-8")
+)
 
 def authenticate_user(username, password):
     try:
@@ -38,18 +46,24 @@ def authenticate_user(username, password):
         return token, False
     return token, True
 
-
 def convert_image_to_base64(image):
     buffered = io.BytesIO()
     image.save(buffered, format="JPEG")
     return base64.b64encode(buffered.getvalue()).decode("utf-8")
-
 
 def extract_text_from_image(image):
     image_data = base64.b64decode(convert_image_to_base64(image))
     image = Image.open(io.BytesIO(image_data))
     return pytesseract.image_to_string(image)
 
+def preprocess_text(text):
+    # Simple text preprocessing: trim whitespace and convert to lowercase.
+    return text.strip().lower()
+
+def send_to_kafka(username, message):
+    data = {"username": username, "message": message}
+    print(f"Sending message to Kafka: {data}")
+    producer.send(KAFKA_TOPIC, data)
 
 if cookies.ready():
     if "token" in cookies:
@@ -60,7 +74,6 @@ if cookies.ready():
         except Exception:
             pass
 
-
 if "expires_at" in st.session_state and datetime.datetime.now(datetime.timezone.utc) > st.session_state["expires_at"]:
     st.error("Session expired. Please log in again.")
     st.session_state.clear()
@@ -69,14 +82,12 @@ if "expires_at" in st.session_state and datetime.datetime.now(datetime.timezone.
     cookies.save()
     st.rerun()
 
-
 def logout():
     st.session_state.clear()
     cookies.__delitem__("token")
     cookies.__delitem__("expires_at")
     cookies.save()
     st.rerun()
-
 
 if "token" not in st.session_state:
     st.title("Login to Image Text Extractor")
@@ -90,6 +101,7 @@ if "token" not in st.session_state:
             st.error("Insufficient permissions. Your account does not have the required role.")
         else:
             st.session_state["token"] = token
+            st.session_state["username"] = username  # store username in session state
             st.session_state["expires_at"] = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=SESSION_EXPIRY_HOURS)
             cookies["token"] = token
             cookies["expires_at"] = st.session_state["expires_at"].isoformat()
@@ -107,7 +119,7 @@ else:
         st.image(image, caption="Uploaded Image", use_container_width=True)
        
         if st.button("Extract Text"):
-            text = extract_text_from_image(image)
-            st.text_area("Extracted Text", text, height=200)
-   
-    # st.write("User authenticated and active session.")
+            raw_text = extract_text_from_image(image)
+            processed_text = preprocess_text(raw_text)
+            st.text_area("Extracted Text", processed_text, height=200)
+            send_to_kafka(st.session_state.get("username", "unknown"), processed_text)
