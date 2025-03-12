@@ -4,6 +4,7 @@ import pytesseract
 from PIL import Image
 import io
 import datetime
+import psycopg2
 from keycloak import KeycloakOpenID
 from streamlit_cookies_manager import CookieManager
 from kafka import KafkaProducer
@@ -20,11 +21,24 @@ SESSION_EXPIRY_HOURS = 3
 KAFKA_TOPIC = "ocr-messages"
 KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 
+# Database settings
+DB_CONFIG = {
+    "dbname": "ai-applications",
+    "user": "postgres",
+    "password": "password",
+    "host": "localhost",
+    "port": "5432"
+}
+
 # Initialize Keycloak client
 keycloak_openid = KeycloakOpenID(server_url=KEYCLOAK_SERVER_URL,
                                  client_id=KEYCLOAK_CLIENT_ID,
                                  realm_name=KEYCLOAK_REALM,
                                  client_secret_key=KEYCLOAK_CLIENT_SECRET)
+
+
+# Streamlit layout configuration
+st.set_page_config(layout="wide")
 
 cookies = CookieManager()
 
@@ -33,6 +47,19 @@ producer = KafkaProducer(
     bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
     value_serializer=lambda v: json.dumps(v).encode("utf-8")
 )
+
+
+def get_db_connection():
+    return psycopg2.connect(**DB_CONFIG)
+
+def fetch_messages_from_db(username):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT text_data, created_at FROM public.extracted_text WHERE username = %s ORDER BY created_at DESC", (username,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"message": row[0], "created_at": row[1].isoformat()} for row in rows]
 
 def authenticate_user(username, password):
     try:
@@ -57,7 +84,6 @@ def extract_text_from_image(image):
     return pytesseract.image_to_string(image)
 
 def preprocess_text(text):
-    # Simple text preprocessing: trim whitespace and convert to lowercase.
     return text.strip().lower()
 
 def send_to_kafka(username, message):
@@ -73,6 +99,8 @@ if cookies.ready():
             st.session_state["expires_at"] = datetime.datetime.fromisoformat(cookies.get("expires_at"))
         except Exception:
             pass
+    if "username" in cookies:
+        st.session_state["username"] = cookies.get("username")
 
 if "expires_at" in st.session_state and datetime.datetime.now(datetime.timezone.utc) > st.session_state["expires_at"]:
     st.error("Session expired. Please log in again.")
@@ -85,6 +113,7 @@ if "expires_at" in st.session_state and datetime.datetime.now(datetime.timezone.
 def logout():
     st.session_state.clear()
     cookies.__delitem__("token")
+    cookies.__delitem__("username")
     cookies.__delitem__("expires_at")
     cookies.save()
     st.rerun()
@@ -101,10 +130,11 @@ if "token" not in st.session_state:
             st.error("Insufficient permissions. Your account does not have the required role.")
         else:
             st.session_state["token"] = token
-            st.session_state["username"] = username  # store username in session state
+            st.session_state["username"] = username
             st.session_state["expires_at"] = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=SESSION_EXPIRY_HOURS)
             cookies["token"] = token
             cookies["expires_at"] = st.session_state["expires_at"].isoformat()
+            cookies["username"] = str(username)
             cookies.save()
             st.success("Login successful!")
             st.rerun()
@@ -112,7 +142,6 @@ else:
     st.title("Dashboard - Image Text Extractor")
     if st.button("Logout"):
         logout()
-   
     uploaded_file = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png"])
     if uploaded_file is not None:
         image = Image.open(uploaded_file)
@@ -123,3 +152,13 @@ else:
             processed_text = preprocess_text(raw_text)
             st.text_area("Extracted Text", processed_text, height=200)
             send_to_kafka(st.session_state.get("username", "unknown"), processed_text)
+    
+    # Fetch and display messages from the database
+    st.subheader("Retrieved Messages")
+    username = st.session_state.get("username", "unknown")
+    messages = fetch_messages_from_db(username)
+    
+    if messages:
+        st.dataframe(messages, use_container_width=True)  # Expands table width
+    else:
+        st.write("No messages found.")

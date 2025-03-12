@@ -3,7 +3,6 @@ import psycopg2
 import logging
 from kafka import KafkaConsumer
 from datetime import datetime
-from flask import Flask, request, jsonify
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -20,9 +19,6 @@ DB_CONFIG = {
 # Kafka Configuration
 KAFKA_TOPIC = "ocr-messages"
 KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
-
-# Flask API Setup
-app = Flask(__name__)
 
 # Connect to PostgreSQL
 def get_db_connection():
@@ -83,24 +79,6 @@ def consume_messages():
         except Exception as e:
             logging.error(f"Error processing message: {e}")
 
-# API to get messages by username
-@app.route("/messages", methods=["GET"])
-def get_messages():
-    username = request.args.get("username")
-    if not username:
-        return jsonify({"error": "Username parameter is required"}), 400
-    
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT text_data, created_at FROM public.extracted_text WHERE username = %s ORDER BY created_at DESC", (username,))
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    
-    messages = [{"message": row[0], "created_at": row[1].isoformat()} for row in rows]
-    return jsonify(messages)
-
 if __name__ == "__main__":
     init_db()
     consume_messages()
-    app.run(host="0.0.0.0", port=5001, debug=True)
